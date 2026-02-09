@@ -60,6 +60,13 @@ cckey rm old-key
 - Linux / macOS
 - Bash 4.0+ or Zsh 5.0+
 
+## Roadmap
+
+- [ ] Auto-failover: detect quota exhaustion and automatically switch to the next key
+- [ ] Multi-app support: manage keys for Codex CLI, Gemini CLI, OpenCode, etc.
+- [ ] Usage tracking: record and display per-key usage statistics
+- [ ] Encrypted storage: encrypt keys at rest with a master password
+
 ## License
 
 MIT
