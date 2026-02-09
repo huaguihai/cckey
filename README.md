@@ -22,19 +22,42 @@ source ~/.bashrc
 
 ## Usage
 
-```bash
-# Add keys
-cckey add main sk-ant-api03-xxxxx
-cckey add backup sk-ant-api03-yyyyy
-cckey add proxy sk-ant-zzzzz https://proxy.example.com
+### Import existing key
 
-# Switch to a key
+If you already have a key configured in Claude Code (`~/.claude/settings.json`), import it directly:
+
+```bash
+cckey import mykey
+```
+
+This reads `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` from your current Claude Code settings and adds them to cckey.
+
+### Add keys
+
+```bash
+# Anthropic official API
+cckey add main sk-ant-api03-xxxxx
+
+# Third-party proxy with custom base URL
+cckey add proxy sk-ant-zzzzz https://proxy.example.com
+```
+
+### Switch keys
+
+```bash
+# Switch to a specific key
 cckey use main
 
 # Rotate to next key (when quota runs out)
 cckey next
+```
 
-# List all keys
+Switching automatically updates `~/.claude/settings.json`, so the next Claude Code session will use the new key immediately.
+
+### Other commands
+
+```bash
+# List all keys (* marks the active one)
 cckey list
 
 # Show active key
@@ -42,13 +65,18 @@ cckey current
 
 # Remove a key
 cckey rm old-key
+
+# Show version
+cckey version
 ```
 
 ## How It Works
 
 - Keys are stored in `~/.cckey/keys.conf`
 - Switching sets `ANTHROPIC_API_KEY` (and `ANTHROPIC_BASE_URL` if configured) in the current shell
+- Switching also syncs `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` to `~/.claude/settings.json` for Claude Code
 - `cckey next` rotates through keys in order, wrapping around to the first
+- Requires `jq` for reading/writing `settings.json`
 
 ## Supported Shells
 
@@ -59,6 +87,7 @@ cckey rm old-key
 
 - Linux / macOS
 - Bash 4.0+ or Zsh 5.0+
+- [jq](https://jqlang.github.io/jq/) (for Claude Code settings sync)
 
 ## Roadmap
 
