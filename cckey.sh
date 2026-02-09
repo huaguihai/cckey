@@ -1,18 +1,34 @@
 #!/bin/bash
 # cckey - Claude Code API Key Manager
-# Version: 0.1.0
+# Version: 0.2.0
 # https://github.com/huaguihai/cckey
 #
 # A lightweight CLI tool for managing multiple Anthropic API keys.
 # Designed for headless Linux servers where GUI tools like cc-switch cannot run.
 
-CCKEY_VERSION="0.1.0"
+CCKEY_VERSION="0.2.0"
 KEYS_DIR="$HOME/.cckey"
 KEYS_FILE="$KEYS_DIR/keys.conf"
 CURRENT_FILE="$KEYS_DIR/current"
+CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 
 mkdir -p "$KEYS_DIR"
 touch "$KEYS_FILE"
+
+_cckey_sync_settings() {
+    local key="$1" url="$2"
+    [ ! -f "$CLAUDE_SETTINGS" ] && return
+    if ! command -v jq &>/dev/null; then
+        echo "Warning: jq not installed, skipping settings.json sync"
+        return
+    fi
+    local tmp="${CLAUDE_SETTINGS}.tmp"
+    jq --arg key "$key" --arg url "$url" '
+        .env.ANTHROPIC_AUTH_TOKEN = $key |
+        if $url != "" then .env.ANTHROPIC_BASE_URL = $url
+        else del(.env.ANTHROPIC_BASE_URL) end
+    ' "$CLAUDE_SETTINGS" > "$tmp" && mv "$tmp" "$CLAUDE_SETTINGS"
+}
 
 _cckey_list() {
     if [ ! -s "$KEYS_FILE" ]; then
@@ -99,6 +115,9 @@ _cckey_use() {
         echo "Switched to: $name"
     fi
     echo "$name" > "$CURRENT_FILE"
+    # Sync to Claude Code settings.json
+    _cckey_sync_settings "$key" "$url"
+    echo "  -> Claude Code settings.json updated"
 }
 
 _cckey_next() {
@@ -133,6 +152,35 @@ _cckey_current() {
     fi
 }
 
+_cckey_import() {
+    if [ ! -f "$CLAUDE_SETTINGS" ]; then
+        echo "Claude Code settings not found at $CLAUDE_SETTINGS"
+        return 1
+    fi
+    if ! command -v jq &>/dev/null; then
+        echo "Error: jq is required for import"
+        return 1
+    fi
+    local key url name
+    key=$(jq -r '.env.ANTHROPIC_AUTH_TOKEN // empty' "$CLAUDE_SETTINGS" 2>/dev/null)
+    if [ -z "$key" ]; then
+        echo "No ANTHROPIC_AUTH_TOKEN found in settings.json"
+        return 1
+    fi
+    url=$(jq -r '.env.ANTHROPIC_BASE_URL // empty' "$CLAUDE_SETTINGS" 2>/dev/null)
+    name="${1:-default}"
+    # Check if this key already exists
+    if grep -q "|${key}|" "$KEYS_FILE" 2>/dev/null; then
+        echo "This key is already in cckey."
+        return 0
+    fi
+    _cckey_add "$name" "$key" "$url"
+    echo "$name" > "$CURRENT_FILE"
+    export ANTHROPIC_API_KEY="$key"
+    [ -n "$url" ] && export ANTHROPIC_BASE_URL="$url"
+    echo "Imported as active key: $name"
+}
+
 cckey() {
     local cmd="${1:-help}"
     shift 2>/dev/null
@@ -143,6 +191,7 @@ cckey() {
         use|switch)   _cckey_use "$@" ;;
         next|n)       _cckey_next ;;
         current)      _cckey_current ;;
+        import)       _cckey_import "$@" ;;
         version|--version|-v) echo "cckey v${CCKEY_VERSION}" ;;
         help|--help|-h|*)
             echo "cckey v${CCKEY_VERSION} - Claude Code API Key Manager"
@@ -154,6 +203,7 @@ cckey() {
             echo "  cckey list                         List all keys"
             echo "  cckey current                      Show active key"
             echo "  cckey rm <name>                    Remove a key"
+            echo "  cckey import [name]                Import key from Claude Code settings"
             echo "  cckey version                      Show version"
             echo "  cckey help                         Show this help"
             ;;
