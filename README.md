@@ -64,28 +64,34 @@ cckey test
 cckey test main
 ```
 
-### Auto-failover
+### Smart rotation
 
-Automatically detect invalid or exhausted keys and switch to the next available one:
-
-```bash
-# Enable auto-failover
-cckey failover on
-
-# Disable auto-failover
-cckey failover off
-
-# Check status
-cckey failover
-```
-
-When enabled, cckey checks the current key validity at shell startup. If the key returns 401, 403, or 429, it automatically rotates through available keys until a working one is found.
-
-### Self-update
+Three rotation strategies to choose from:
 
 ```bash
-cckey update
+# 1. Failover (default) — auto-switch on API errors (401/403/429)
+cckey rotate failover
+
+# 2. Timer — rotate every N hours
+cckey rotate timer 4
+
+# 3. Counter — rotate every N shell sessions
+cckey rotate counter 10
+
+# Disable rotation
+cckey rotate off
+
+# Check current strategy
+cckey rotate status
 ```
+
+| Strategy | Trigger | Best for |
+|----------|---------|----------|
+| `failover` | API returns 401/403/429 | Error recovery, quota exhaustion |
+| `timer` | Time interval elapsed | Even usage distribution over time |
+| `counter` | Shell session count reached | Even usage distribution by sessions |
+
+The `failover` strategy checks the key at shell startup and rotates through available keys until a working one is found. The `timer` and `counter` strategies silently rotate to the next key when the threshold is reached.
 
 ### Other commands
 
@@ -96,14 +102,20 @@ cckey list
 # Show active key
 cckey current
 
+# Rename a key
+cckey rename old-name new-name
+
 # Remove a key
 cckey rm old-key
+
+# Self-update to latest version
+cckey update
 
 # Show version
 cckey version
 ```
 
-Tab completion is supported for both Bash and Zsh. Key names auto-complete for `use`, `rm`, and `test` commands.
+Tab completion is supported for both Bash and Zsh. Commands, key names, and rotation strategies auto-complete.
 
 ## How It Works
 
@@ -112,6 +124,7 @@ Tab completion is supported for both Bash and Zsh. Key names auto-complete for `
 - Switching sets `ANTHROPIC_API_KEY` (and `ANTHROPIC_BASE_URL` if configured) in the current shell
 - Switching also syncs `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` to `~/.claude/settings.json` for Claude Code
 - `cckey next` rotates through keys in order, wrapping around to the first
+- Rotation config is stored in `~/.cckey/rotate.conf`
 - Requires `jq` for reading/writing `settings.json`
 
 ## Supported Shells
@@ -129,6 +142,7 @@ Tab completion is supported for both Bash and Zsh. Key names auto-complete for `
 ## Roadmap
 
 - [x] Auto-failover: detect quota exhaustion and automatically switch to the next key
+- [x] Smart rotation: timer-based and session-count-based key rotation
 - [ ] Multi-app support: manage keys for Codex CLI, Gemini CLI, OpenCode, etc.
 - [ ] Usage tracking: record and display per-key usage statistics
 - [ ] Encrypted storage: encrypt keys at rest with a master password

@@ -1,12 +1,12 @@
 #!/bin/bash
 # cckey - Claude Code API Key Manager
-# Version: 0.3.0
+# Version: 0.4.0
 # https://github.com/huaguihai/cckey
 #
 # A lightweight CLI tool for managing multiple Anthropic API keys.
 # Designed for headless Linux servers where GUI tools like cc-switch cannot run.
 
-CCKEY_VERSION="0.3.0"
+CCKEY_VERSION="0.4.0"
 KEYS_DIR="$HOME/.cckey"
 KEYS_FILE="$KEYS_DIR/keys.conf"
 CURRENT_FILE="$KEYS_DIR/current"
@@ -308,72 +308,179 @@ _cckey_update() {
     echo "Run 'source ~/.bashrc' or 'source ~/.zshrc' to apply."
 }
 
-_cckey_failover() {
+_cckey_rotate_conf="${KEYS_DIR}/rotate.conf"
+
+_cckey_rotate_read() {
+    local mode="off" timer_hours="4" counter_max="10"
+    if [ -f "$_cckey_rotate_conf" ]; then
+        eval "$(grep -E '^(mode|timer_hours|counter_max)=' "$_cckey_rotate_conf" 2>/dev/null)"
+    fi
+    echo "$mode|$timer_hours|$counter_max"
+}
+
+_cckey_rotate_write() {
+    local mode="$1" timer_hours="$2" counter_max="$3"
+    cat > "$_cckey_rotate_conf" <<CONF
+mode=$mode
+timer_hours=$timer_hours
+counter_max=$counter_max
+CONF
+    chmod 600 "$_cckey_rotate_conf"
+}
+
+_cckey_rotate() {
     local action="${1:-status}"
-    local failover_file="${KEYS_DIR}/failover"
+    local conf
+    conf=$(_cckey_rotate_read)
+    local cur_mode cur_timer cur_counter
+    cur_mode=$(echo "$conf" | cut -d'|' -f1)
+    cur_timer=$(echo "$conf" | cut -d'|' -f2)
+    cur_counter=$(echo "$conf" | cut -d'|' -f3)
     case "$action" in
-        on)
-            echo "1" > "$failover_file"
-            echo "Auto-failover enabled. Invalid keys will be skipped automatically."
+        failover)
+            _cckey_rotate_write "failover" "$cur_timer" "$cur_counter"
+            echo "Rotate mode: failover (auto-switch on API errors)"
+            ;;
+        timer)
+            local hours="${2:-$cur_timer}"
+            if ! echo "$hours" | grep -qE '^[0-9]+\.?[0-9]*$'; then
+                echo "Usage: cckey rotate timer <hours>"
+                return 1
+            fi
+            _cckey_rotate_write "timer" "$hours" "$cur_counter"
+            # Record current time as last switch
+            date +%s > "${KEYS_DIR}/last_switch"
+            echo "Rotate mode: timer (every ${hours}h)"
+            ;;
+        counter)
+            local max="${2:-$cur_counter}"
+            if ! echo "$max" | grep -qE '^[0-9]+$'; then
+                echo "Usage: cckey rotate counter <max_sessions>"
+                return 1
+            fi
+            _cckey_rotate_write "counter" "$cur_timer" "$max"
+            echo "0" > "${KEYS_DIR}/session_count"
+            echo "Rotate mode: counter (every ${max} sessions)"
             ;;
         off)
-            rm -f "$failover_file"
-            echo "Auto-failover disabled."
+            _cckey_rotate_write "off" "$cur_timer" "$cur_counter"
+            echo "Rotation disabled."
             ;;
         status)
-            if [ -f "$failover_file" ] && [ "$(cat "$failover_file")" = "1" ]; then
-                echo "Auto-failover: enabled"
-            else
-                echo "Auto-failover: disabled"
-            fi
+            echo "Rotate mode: $cur_mode"
+            case "$cur_mode" in
+                failover) echo "  Strategy: auto-switch on 401/403/429 errors" ;;
+                timer)
+                    echo "  Interval: every ${cur_timer}h"
+                    if [ -f "${KEYS_DIR}/last_switch" ]; then
+                        local last_switch now elapsed remaining
+                        last_switch=$(cat "${KEYS_DIR}/last_switch")
+                        now=$(date +%s)
+                        elapsed=$(( (now - last_switch) / 3600 ))
+                        remaining=$(echo "$cur_timer $elapsed" | awk '{r=$1-$2; if(r<0) r=0; printf "%.1f", r}')
+                        echo "  Last switch: ${elapsed}h ago, next in ~${remaining}h"
+                    fi
+                    ;;
+                counter)
+                    local current_count=0
+                    [ -f "${KEYS_DIR}/session_count" ] && current_count=$(cat "${KEYS_DIR}/session_count")
+                    echo "  Threshold: every ${cur_counter} sessions"
+                    echo "  Current count: ${current_count}/${cur_counter}"
+                    ;;
+                off) echo "  No automatic rotation." ;;
+            esac
             ;;
         *)
-            echo "Usage: cckey failover [on|off|status]"
+            echo "Usage: cckey rotate <failover|timer|counter|off|status>"
+            echo ""
+            echo "Strategies:"
+            echo "  cckey rotate failover              Auto-switch on API errors (default)"
+            echo "  cckey rotate timer <hours>          Rotate every N hours"
+            echo "  cckey rotate counter <sessions>     Rotate every N sessions"
+            echo "  cckey rotate off                    Disable rotation"
+            echo "  cckey rotate status                 Show current strategy"
             return 1
             ;;
     esac
 }
 
-_cckey_check_and_failover() {
-    local failover_file="${KEYS_DIR}/failover"
-    [ ! -f "$failover_file" ] || [ "$(cat "$failover_file")" != "1" ] && return
+_cckey_check_rotate() {
+    [ ! -f "$_cckey_rotate_conf" ] && return
+    local conf
+    conf=$(_cckey_rotate_read)
+    local mode timer_hours counter_max
+    mode=$(echo "$conf" | cut -d'|' -f1)
+    timer_hours=$(echo "$conf" | cut -d'|' -f2)
+    counter_max=$(echo "$conf" | cut -d'|' -f3)
+    [ "$mode" = "off" ] && return
     [ ! -s "$KEYS_FILE" ] && return
-    [ -z "$ANTHROPIC_API_KEY" ] && return
     local key_count
     key_count=$(grep -c '.' "$KEYS_FILE" 2>/dev/null)
     [ "$key_count" -le 1 ] && return
-    # Quick check current key
-    local api_url="${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
-    local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${api_url}/v1/messages" \
-        -H "x-api-key: ${ANTHROPIC_API_KEY}" \
-        -H "anthropic-version: 2023-06-01" \
-        -H "content-type: application/json" \
-        -d '{"model":"claude-sonnet-4-20250514","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' 2>/dev/null)
-    if [ "$http_code" = "401" ] || [ "$http_code" = "403" ] || [ "$http_code" = "429" ]; then
-        local current_name=""
-        [ -f "$CURRENT_FILE" ] && current_name=$(cat "$CURRENT_FILE")
-        echo "[cckey] Key '$current_name' failed (HTTP $http_code), switching to next..."
-        local tried=0
-        while [ "$tried" -lt "$key_count" ]; do
-            _cckey_next
-            tried=$((tried + 1))
-            # Test the new key
-            api_url="${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
-            http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${api_url}/v1/messages" \
+
+    case "$mode" in
+        failover)
+            [ -z "$ANTHROPIC_API_KEY" ] && return
+            command -v curl &>/dev/null || return
+            local api_url="${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
+            local http_code
+            http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -X POST "${api_url}/v1/messages" \
                 -H "x-api-key: ${ANTHROPIC_API_KEY}" \
                 -H "anthropic-version: 2023-06-01" \
                 -H "content-type: application/json" \
                 -d '{"model":"claude-sonnet-4-20250514","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' 2>/dev/null)
-            if [ "$http_code" = "200" ]; then
-                echo "[cckey] Failover successful."
-                return 0
+            if [ "$http_code" = "401" ] || [ "$http_code" = "403" ] || [ "$http_code" = "429" ]; then
+                local current_name=""
+                [ -f "$CURRENT_FILE" ] && current_name=$(cat "$CURRENT_FILE")
+                echo "[cckey] Key '$current_name' failed (HTTP $http_code), switching to next..."
+                local tried=0
+                while [ "$tried" -lt "$key_count" ]; do
+                    _cckey_next
+                    tried=$((tried + 1))
+                    api_url="${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
+                    http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -X POST "${api_url}/v1/messages" \
+                        -H "x-api-key: ${ANTHROPIC_API_KEY}" \
+                        -H "anthropic-version: 2023-06-01" \
+                        -H "content-type: application/json" \
+                        -d '{"model":"claude-sonnet-4-20250514","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' 2>/dev/null)
+                    if [ "$http_code" = "200" ]; then
+                        echo "[cckey] Failover successful."
+                        return 0
+                    fi
+                done
+                echo "[cckey] Warning: all keys failed."
+                return 1
             fi
-        done
-        echo "[cckey] Warning: all keys failed."
-        return 1
-    fi
+            ;;
+        timer)
+            local last_switch=0 now
+            [ -f "${KEYS_DIR}/last_switch" ] && last_switch=$(cat "${KEYS_DIR}/last_switch")
+            now=$(date +%s)
+            local interval_sec
+            interval_sec=$(echo "$timer_hours" | awk '{printf "%d", $1 * 3600}')
+            if [ $((now - last_switch)) -ge "$interval_sec" ]; then
+                echo "[cckey] Timer expired (${timer_hours}h), rotating key..."
+                _cckey_next
+                echo "$now" > "${KEYS_DIR}/last_switch"
+            fi
+            ;;
+        counter)
+            local current_count=0
+            [ -f "${KEYS_DIR}/session_count" ] && current_count=$(cat "${KEYS_DIR}/session_count")
+            current_count=$((current_count + 1))
+            if [ "$current_count" -ge "$counter_max" ]; then
+                echo "[cckey] Session limit reached (${counter_max}), rotating key..."
+                _cckey_next
+                echo "0" > "${KEYS_DIR}/session_count"
+            else
+                echo "$current_count" > "${KEYS_DIR}/session_count"
+            fi
+            ;;
+    esac
 }
+
+# Run rotation check on source
+_cckey_check_rotate
 
 cckey() {
     local cmd="${1:-help}"
@@ -388,7 +495,14 @@ cckey() {
         current)      _cckey_current ;;
         import)       _cckey_import "$@" ;;
         test)         _cckey_test "$@" ;;
-        failover)     _cckey_failover "$@" ;;
+        rotate)       _cckey_rotate "$@" ;;
+        failover)     # backward compat
+            case "$1" in
+                on)  _cckey_rotate failover ;;
+                off) _cckey_rotate off ;;
+                *)   _cckey_rotate status ;;
+            esac
+            ;;
         update)       _cckey_update ;;
         version|--version|-v) echo "cckey v${CCKEY_VERSION}" ;;
         help|--help|-h|*)
@@ -404,7 +518,7 @@ cckey() {
             echo "  cckey rename <old> <new>           Rename a key"
             echo "  cckey import [name]                Import key from Claude Code settings"
             echo "  cckey test [name]                  Test if a key is valid"
-            echo "  cckey failover [on|off|status]     Auto-failover on quota exhaustion"
+            echo "  cckey rotate <strategy> [value]     Smart rotation (failover|timer|counter|off|status)"
             echo "  cckey update                       Update cckey to latest version"
             echo "  cckey version                      Show version"
             echo "  cckey help                         Show this help"
@@ -422,11 +536,14 @@ if [ -n "$BASH_VERSION" ]; then
         local cur="${COMP_WORDS[COMP_CWORD]}"
         local prev="${COMP_WORDS[COMP_CWORD-1]}"
         if [ "$COMP_CWORD" -eq 1 ]; then
-            COMPREPLY=($(compgen -W "add use switch rm remove rename next list ls current import test failover update version help" -- "$cur"))
+            COMPREPLY=($(compgen -W "add use switch rm remove rename next list ls current import test rotate update version help" -- "$cur"))
         elif [ "$COMP_CWORD" -eq 2 ]; then
             case "$prev" in
                 use|switch|rm|remove|test|rename)
                     COMPREPLY=($(compgen -W "$(_cckey_key_names)" -- "$cur"))
+                    ;;
+                rotate)
+                    COMPREPLY=($(compgen -W "failover timer counter off status" -- "$cur"))
                     ;;
             esac
         fi
@@ -438,7 +555,7 @@ elif [ -n "$ZSH_VERSION" ]; then
             'rm:Remove a key' 'remove:Remove a key' 'rename:Rename a key' 'next:Switch to next key'
             'list:List all keys' 'ls:List all keys' 'current:Show active key'
             'import:Import key from Claude Code settings' 'test:Test if a key is valid'
-            'failover:Auto-failover on quota exhaustion' 'update:Update cckey to latest version'
+            'rotate:Smart key rotation strategy' 'update:Update cckey to latest version'
             'version:Show version' 'help:Show help')
         if (( CURRENT == 2 )); then
             _describe 'command' subcmds
@@ -447,6 +564,11 @@ elif [ -n "$ZSH_VERSION" ]; then
                 use|switch|rm|remove|test|rename)
                     local -a keys=(${(f)"$(_cckey_key_names)"})
                     _describe 'key name' keys
+                    ;;
+                rotate)
+                    local -a strategies=('failover:Auto-switch on API errors' 'timer:Rotate every N hours'
+                        'counter:Rotate every N sessions' 'off:Disable rotation' 'status:Show current strategy')
+                    _describe 'strategy' strategies
                     ;;
             esac
         fi
