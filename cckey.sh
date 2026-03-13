@@ -64,7 +64,7 @@ _cckey_add() {
     fi
     # Remove existing entry with the same name
     if grep -q "^${name}|" "$KEYS_FILE" 2>/dev/null; then
-        sed -i "/^${name}|/d" "$KEYS_FILE"
+        sed -i.bak "/^${name}|/d" "$KEYS_FILE" && rm -f "${KEYS_FILE}.bak"
         echo "Updated key: $name"
     else
         echo "Added key: $name"
@@ -79,7 +79,7 @@ _cckey_rm() {
         return 1
     fi
     if grep -q "^${name}|" "$KEYS_FILE" 2>/dev/null; then
-        sed -i "/^${name}|/d" "$KEYS_FILE"
+        sed -i.bak "/^${name}|/d" "$KEYS_FILE" && rm -f "${KEYS_FILE}.bak"
         echo "Removed key: $name"
         # Clear current if it was the active one
         [ -f "$CURRENT_FILE" ] && [ "$(cat "$CURRENT_FILE")" = "$name" ] && rm -f "$CURRENT_FILE"
