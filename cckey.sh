@@ -213,7 +213,7 @@ _cckey_test() {
     fi
     local api_url="${url:-https://api.anthropic.com}"
     echo "Testing key: $name ..."
-    local response status
+    local response http_code
     if command -v curl &>/dev/null; then
         response=$(curl -s -w "\n%{http_code}" -X POST "${api_url}/v1/messages" \
             -H "x-api-key: ${key}" \
@@ -239,10 +239,10 @@ _cckey_test() {
         echo "Error: curl or wget is required."
         return 1
     fi
-    status=$(echo "$response" | tail -1)
+    http_code=$(echo "$response" | tail -1)
     local body
     body=$(echo "$response" | sed '$d')
-    case "$status" in
+    case "$http_code" in
         200) echo "OK: Key is valid." ;;
         401) echo "FAIL: Invalid API key (unauthorized)." ; return 1 ;;
         403) echo "FAIL: Access denied (forbidden)." ; return 1 ;;
@@ -250,7 +250,7 @@ _cckey_test() {
         *)
             local err_msg
             err_msg=$(echo "$body" | grep -o '"message":"[^"]*"' | head -1 | cut -d'"' -f4)
-            echo "FAIL (HTTP $status): ${err_msg:-unknown error}"
+            echo "FAIL (HTTP $http_code): ${err_msg:-unknown error}"
             return 1
             ;;
     esac
@@ -322,28 +322,28 @@ _cckey_check_and_failover() {
     [ "$key_count" -le 1 ] && return
     # Quick check current key
     local api_url="${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
-    local status
-    status=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${api_url}/v1/messages" \
+    local http_code
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${api_url}/v1/messages" \
         -H "x-api-key: ${ANTHROPIC_API_KEY}" \
         -H "anthropic-version: 2023-06-01" \
         -H "content-type: application/json" \
         -d '{"model":"claude-sonnet-4-20250514","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' 2>/dev/null)
-    if [ "$status" = "401" ] || [ "$status" = "403" ] || [ "$status" = "429" ]; then
+    if [ "$http_code" = "401" ] || [ "$http_code" = "403" ] || [ "$http_code" = "429" ]; then
         local current_name=""
         [ -f "$CURRENT_FILE" ] && current_name=$(cat "$CURRENT_FILE")
-        echo "[cckey] Key '$current_name' failed (HTTP $status), switching to next..."
+        echo "[cckey] Key '$current_name' failed (HTTP $http_code), switching to next..."
         local tried=0
         while [ "$tried" -lt "$key_count" ]; do
             _cckey_next
             tried=$((tried + 1))
             # Test the new key
             api_url="${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
-            status=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${api_url}/v1/messages" \
+            http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${api_url}/v1/messages" \
                 -H "x-api-key: ${ANTHROPIC_API_KEY}" \
                 -H "anthropic-version: 2023-06-01" \
                 -H "content-type: application/json" \
                 -d '{"model":"claude-sonnet-4-20250514","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' 2>/dev/null)
-            if [ "$status" = "200" ]; then
+            if [ "$http_code" = "200" ]; then
                 echo "[cckey] Failover successful."
                 return 0
             fi
@@ -427,5 +427,5 @@ elif [ -n "$ZSH_VERSION" ]; then
             esac
         fi
     }
-    compdef _cckey_zsh_complete cckey
+    compdef _cckey_zsh_complete cckey 2>/dev/null
 fi
