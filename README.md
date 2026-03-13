@@ -132,9 +132,18 @@ Tab completion is supported for both Bash and Zsh. Commands, key names, and rota
 - Bash
 - Zsh
 
+## Platform Support
+
+| Platform | Status | Notes |
+|----------|--------|-------|
+| Linux | Fully supported | |
+| macOS | Fully supported | |
+| Windows (WSL) | Fully supported | Install inside WSL, same as Linux |
+| Windows (PowerShell) | Not supported | Use WSL instead |
+
 ## Requirements
 
-- Linux / macOS
+- Linux / macOS / WSL
 - Bash 4.0+ or Zsh 5.0+
 - [jq](https://jqlang.github.io/jq/) (for Claude Code settings sync)
 - `curl` or `wget` (for `test`, `update`, and `failover` features)
@@ -146,6 +155,7 @@ Tab completion is supported for both Bash and Zsh. Commands, key names, and rota
 - [ ] Multi-app support: manage keys for Codex CLI, Gemini CLI, OpenCode, etc.
 - [ ] Usage tracking: record and display per-key usage statistics
 - [ ] Encrypted storage: encrypt keys at rest with a master password
+- [ ] Native Windows PowerShell support
 
 ## License
 
