@@ -138,7 +138,7 @@ Tab completion is supported for both Bash and Zsh. Commands, key names, and rota
 |----------|--------|-------|
 | Linux | Fully supported | |
 | macOS | Fully supported | |
-| Windows (WSL) | Fully supported | Install inside WSL, same as Linux |
+| Windows (WSL) | Fully supported | [Install WSL](https://learn.microsoft.com/en-us/windows/wsl/install), then use same as Linux |
 | Windows (PowerShell) | Not supported | Use WSL instead |
 
 ## Requirements
