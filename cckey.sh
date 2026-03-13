@@ -94,6 +94,28 @@ _cckey_rm() {
     fi
 }
 
+_cckey_rename() {
+    local old="$1" new="$2"
+    if [ -z "$old" ] || [ -z "$new" ]; then
+        echo "Usage: cckey rename <old_name> <new_name>"
+        return 1
+    fi
+    if ! grep -q "^${old}|" "$KEYS_FILE" 2>/dev/null; then
+        echo "Key not found: $old"
+        return 1
+    fi
+    if grep -q "^${new}|" "$KEYS_FILE" 2>/dev/null; then
+        echo "Key name already exists: $new"
+        return 1
+    fi
+    sed -i.bak "s/^${old}|/${new}|/" "$KEYS_FILE" && rm -f "${KEYS_FILE}.bak"
+    # Update current if it was the active one
+    if [ -f "$CURRENT_FILE" ] && [ "$(cat "$CURRENT_FILE")" = "$old" ]; then
+        echo "$new" > "$CURRENT_FILE"
+    fi
+    echo "Renamed: $old -> $new"
+}
+
 _cckey_use() {
     local name="$1"
     if [ -z "$name" ]; then
@@ -360,6 +382,7 @@ cckey() {
         list|ls)      _cckey_list ;;
         add)          _cckey_add "$@" ;;
         rm|remove)    _cckey_rm "$@" ;;
+        rename)       _cckey_rename "$@" ;;
         use|switch)   _cckey_use "$@" ;;
         next|n)       _cckey_next ;;
         current)      _cckey_current ;;
@@ -378,6 +401,7 @@ cckey() {
             echo "  cckey list                         List all keys"
             echo "  cckey current                      Show active key"
             echo "  cckey rm <name>                    Remove a key"
+            echo "  cckey rename <old> <new>           Rename a key"
             echo "  cckey import [name]                Import key from Claude Code settings"
             echo "  cckey test [name]                  Test if a key is valid"
             echo "  cckey failover [on|off|status]     Auto-failover on quota exhaustion"
@@ -398,10 +422,10 @@ if [ -n "$BASH_VERSION" ]; then
         local cur="${COMP_WORDS[COMP_CWORD]}"
         local prev="${COMP_WORDS[COMP_CWORD-1]}"
         if [ "$COMP_CWORD" -eq 1 ]; then
-            COMPREPLY=($(compgen -W "add use switch rm remove next list ls current import test failover update version help" -- "$cur"))
+            COMPREPLY=($(compgen -W "add use switch rm remove rename next list ls current import test failover update version help" -- "$cur"))
         elif [ "$COMP_CWORD" -eq 2 ]; then
             case "$prev" in
-                use|switch|rm|remove|test)
+                use|switch|rm|remove|test|rename)
                     COMPREPLY=($(compgen -W "$(_cckey_key_names)" -- "$cur"))
                     ;;
             esac
@@ -411,7 +435,7 @@ if [ -n "$BASH_VERSION" ]; then
 elif [ -n "$ZSH_VERSION" ]; then
     _cckey_zsh_complete() {
         local -a subcmds=('add:Add or update a key' 'use:Switch to a key' 'switch:Switch to a key'
-            'rm:Remove a key' 'remove:Remove a key' 'next:Switch to next key'
+            'rm:Remove a key' 'remove:Remove a key' 'rename:Rename a key' 'next:Switch to next key'
             'list:List all keys' 'ls:List all keys' 'current:Show active key'
             'import:Import key from Claude Code settings' 'test:Test if a key is valid'
             'failover:Auto-failover on quota exhaustion' 'update:Update cckey to latest version'
@@ -420,7 +444,7 @@ elif [ -n "$ZSH_VERSION" ]; then
             _describe 'command' subcmds
         elif (( CURRENT == 3 )); then
             case "${words[2]}" in
-                use|switch|rm|remove|test)
+                use|switch|rm|remove|test|rename)
                     local -a keys=(${(f)"$(_cckey_key_names)"})
                     _describe 'key name' keys
                     ;;
