@@ -1,12 +1,13 @@
 #!/bin/bash
-# cckey - Claude Code API Key Manager
-# Version: 0.4.0
+# cckey - AI CLI API Key Manager
+# Version: 0.5.0
 # https://github.com/huaguihai/cckey
 #
-# A lightweight CLI tool for managing multiple Anthropic API keys.
-# Designed for headless Linux servers where GUI tools like cc-switch cannot run.
+# A lightweight CLI tool for managing multiple AI API keys.
+# Supports Claude Code, Codex CLI, and Gemini CLI.
+# Designed for headless Linux servers where GUI tools cannot run.
 
-CCKEY_VERSION="0.4.0"
+CCKEY_VERSION="0.5.0"
 KEYS_DIR="$HOME/.cckey"
 KEYS_FILE="$KEYS_DIR/keys.conf"
 CURRENT_FILE="$KEYS_DIR/current"
@@ -39,7 +40,7 @@ _cckey_list() {
     [ -f "$CURRENT_FILE" ] && current=$(cat "$CURRENT_FILE")
     echo "Configured API Keys:"
     echo "-------------------------------------------"
-    while IFS='|' read -r name key url; do
+    while IFS='|' read -r name key url type; do
         [ -z "$name" ] && continue
         local masked
         if [ ${#key} -gt 16 ]; then
@@ -49,10 +50,11 @@ _cckey_list() {
         fi
         local marker="  "
         [ "$name" = "$current" ] && marker="* "
+        local type_label="[${type:-claude}]"
         if [ -n "$url" ]; then
-            echo "${marker}${name}  ${masked}  (${url})"
+            echo "${marker}${name}  ${masked}  (${url})  ${type_label}"
         else
-            echo "${marker}${name}  ${masked}"
+            echo "${marker}${name}  ${masked}  ${type_label}"
         fi
     done < "$KEYS_FILE"
     echo "-------------------------------------------"
@@ -60,13 +62,31 @@ _cckey_list() {
 }
 
 _cckey_add() {
-    local name="$1" key="$2" url="$3"
+    local name="$1" key="$2" url="" type="claude"
+    shift 2
+    # $3 onward: optional url (if not starting with --), then optional --type flag
+    if [ -n "$1" ] && [[ "$1" != --* ]]; then
+        url="$1"
+        shift
+    fi
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --type) type="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
     if [ -z "$name" ] || [ -z "$key" ]; then
-        echo "Usage: cckey add <name> <api_key> [base_url]"
+        echo "Usage: cckey add <name> <api_key> [base_url] [--type claude|codex|gemini]"
         echo "Example: cckey add main sk-ant-api03-xxxxx"
         echo "         cckey add proxy sk-xxxxx https://proxy.example.com"
+        echo "         cckey add gpt4 sk-openai-xxxxx --type codex"
+        echo "         cckey add gem1 AIza-xxxxx --type gemini"
         return 1
     fi
+    case "$type" in
+        claude|codex|gemini) ;;
+        *) echo "Invalid type: $type. Must be claude, codex, or gemini."; return 1 ;;
+    esac
     # Remove existing entry with the same name
     if grep -q "^${name}|" "$KEYS_FILE" 2>/dev/null; then
         sed -i.bak "/^${name}|/d" "$KEYS_FILE" && rm -f "${KEYS_FILE}.bak"
@@ -74,7 +94,7 @@ _cckey_add() {
     else
         echo "Added key: $name"
     fi
-    echo "${name}|${key}|${url}" >> "$KEYS_FILE"
+    echo "${name}|${key}|${url}|${type}" >> "$KEYS_FILE"
 }
 
 _cckey_rm() {
@@ -116,6 +136,38 @@ _cckey_rename() {
     echo "Renamed: $old -> $new"
 }
 
+_cckey_apply_key() {
+    local name="$1" key="$2" url="$3" type="${4:-claude}"
+    case "$type" in
+        codex)
+            export OPENAI_API_KEY="$key"
+            if [ -n "$url" ]; then
+                export OPENAI_BASE_URL="$url"
+                echo "Switched to: $name (base_url: $url)"
+            else
+                unset OPENAI_BASE_URL
+                echo "Switched to: $name"
+            fi
+            ;;
+        gemini)
+            export GEMINI_API_KEY="$key"
+            echo "Switched to: $name"
+            ;;
+        *) # claude (default)
+            export ANTHROPIC_API_KEY="$key"
+            if [ -n "$url" ]; then
+                export ANTHROPIC_BASE_URL="$url"
+                echo "Switched to: $name (base_url: $url)"
+            else
+                unset ANTHROPIC_BASE_URL
+                echo "Switched to: $name"
+            fi
+            _cckey_sync_settings "$key" "$url"
+            echo "  -> Claude Code settings.json updated"
+            ;;
+    esac
+}
+
 _cckey_use() {
     local name="$1"
     if [ -z "$name" ]; then
@@ -130,21 +182,12 @@ _cckey_use() {
         _cckey_list
         return 1
     fi
-    local key url
+    local key url type
     key=$(echo "$line" | cut -d'|' -f2)
     url=$(echo "$line" | cut -d'|' -f3)
-    export ANTHROPIC_API_KEY="$key"
-    if [ -n "$url" ]; then
-        export ANTHROPIC_BASE_URL="$url"
-        echo "Switched to: $name (base_url: $url)"
-    else
-        unset ANTHROPIC_BASE_URL
-        echo "Switched to: $name"
-    fi
+    type=$(echo "$line" | cut -d'|' -f4)
     echo "$name" > "$CURRENT_FILE" && chmod 600 "$CURRENT_FILE"
-    # Sync to Claude Code settings.json
-    _cckey_sync_settings "$key" "$url"
-    echo "  -> Claude Code settings.json updated"
+    _cckey_apply_key "$name" "$key" "$url" "${type:-claude}"
 }
 
 _cckey_next() {
@@ -152,10 +195,20 @@ _cckey_next() {
         echo "No keys configured."
         return 1
     fi
-    local current="" found_current=0 first_name=""
+    # Determine current type to rotate within same type only
+    local current="" current_type="claude"
     [ -f "$CURRENT_FILE" ] && current=$(cat "$CURRENT_FILE")
-    while IFS='|' read -r name key url; do
+    if [ -n "$current" ]; then
+        local current_line
+        current_line=$(grep "^${current}|" "$KEYS_FILE" 2>/dev/null)
+        [ -n "$current_line" ] && current_type=$(echo "$current_line" | cut -d'|' -f4)
+        current_type="${current_type:-claude}"
+    fi
+    local found_current=0 first_name=""
+    while IFS='|' read -r name key url type; do
         [ -z "$name" ] && continue
+        local entry_type="${type:-claude}"
+        [ "$entry_type" != "$current_type" ] && continue
         [ -z "$first_name" ] && first_name="$name"
         if [ "$found_current" -eq 1 ]; then
             _cckey_use "$name"
@@ -163,22 +216,33 @@ _cckey_next() {
         fi
         [ "$name" = "$current" ] && found_current=1
     done < "$KEYS_FILE"
-    # Wrap around to the first key
-    _cckey_use "$first_name"
+    # Wrap around to first key of same type
+    if [ -n "$first_name" ]; then
+        _cckey_use "$first_name"
+        return 0
+    fi
+    echo "No keys configured."
+    return 1
 }
 
 _cckey_current() {
     if [ -f "$CURRENT_FILE" ] && [ -n "$(cat "$CURRENT_FILE")" ]; then
         local name
         name=$(cat "$CURRENT_FILE")
+        local line key url type
+        line=$(grep "^${name}|" "$KEYS_FILE" 2>/dev/null)
+        key=$(echo "$line" | cut -d'|' -f2)
+        url=$(echo "$line" | cut -d'|' -f3)
+        type=$(echo "$line" | cut -d'|' -f4)
+        type="${type:-claude}"
         local masked
-        if [ ${#ANTHROPIC_API_KEY} -gt 16 ]; then
-            masked="${ANTHROPIC_API_KEY:0:10}...${ANTHROPIC_API_KEY: -4}"
+        if [ ${#key} -gt 16 ]; then
+            masked="${key:0:10}...${key: -4}"
         else
-            masked="${ANTHROPIC_API_KEY:0:4}****"
+            masked="${key:0:4}****"
         fi
-        echo "Current: $name ($masked)"
-        [ -n "$ANTHROPIC_BASE_URL" ] && echo "Base URL: $ANTHROPIC_BASE_URL"
+        echo "Current: $name ($masked)  [${type}]"
+        [ -n "$url" ] && echo "Base URL: $url"
     else
         echo "No key is active. Use: cckey use <name>"
     fi
@@ -506,12 +570,13 @@ cckey() {
         update)       _cckey_update ;;
         version|--version|-v) echo "cckey v${CCKEY_VERSION}" ;;
         help|--help|-h|*)
-            echo "cckey v${CCKEY_VERSION} - Claude Code API Key Manager"
+            echo "cckey v${CCKEY_VERSION} - AI CLI API Key Manager"
             echo ""
             echo "Commands:"
-            echo "  cckey add <name> <key> [base_url]  Add or update a key"
+            echo "  cckey add <name> <key> [base_url] [--type claude|codex|gemini]"
+            echo "                                     Add or update a key"
             echo "  cckey use <name>                   Switch to a key"
-            echo "  cckey next                         Switch to next key (rotate)"
+            echo "  cckey next                         Switch to next key of same type"
             echo "  cckey list                         List all keys"
             echo "  cckey current                      Show active key"
             echo "  cckey rm <name>                    Remove a key"
