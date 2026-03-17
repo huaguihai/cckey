@@ -1,8 +1,8 @@
 # cckey
 
-Lightweight CLI tool for managing multiple Anthropic API keys for [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
+Lightweight CLI tool for managing multiple AI API keys for [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://github.com/openai/codex), and [Gemini CLI](https://github.com/google-gemini/gemini-cli).
 
-Designed for headless servers and terminals where GUI tools like [cc-switch](https://github.com/farion1231/cc-switch) cannot run.
+Designed for headless servers and terminals where GUI tools cannot run.
 
 ## Install
 
@@ -35,11 +35,20 @@ This reads `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` from your current Cla
 ### Add keys
 
 ```bash
-# Anthropic official API
+# Claude Code (Anthropic official API)
 cckey add main sk-ant-api03-xxxxx
 
-# Third-party proxy with custom base URL
+# Claude Code with third-party proxy
 cckey add proxy sk-ant-zzzzz https://proxy.example.com
+
+# Codex CLI (OpenAI)
+cckey add gpt4 sk-openai-xxxxx --type codex
+
+# Codex CLI with custom base URL
+cckey add gpt4-proxy sk-openai-xxxxx https://api.openai.com --type codex
+
+# Gemini CLI
+cckey add gem1 AIzaSy-xxxxx --type gemini
 ```
 
 ### Switch keys
@@ -48,11 +57,19 @@ cckey add proxy sk-ant-zzzzz https://proxy.example.com
 # Switch to a specific key
 cckey use main
 
-# Rotate to next key (when quota runs out)
+# Rotate to next key of the same type (when quota runs out)
 cckey next
 ```
 
-Switching automatically updates `~/.claude/settings.json`, so the next Claude Code session will use the new key immediately.
+Switching a Claude key automatically updates `~/.claude/settings.json`, so the next Claude Code session uses the new key immediately.
+
+Each key type sets the appropriate environment variables:
+
+| Type | Environment Variables |
+|------|-----------------------|
+| `claude` | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` (+ `settings.json` sync) |
+| `codex` | `OPENAI_API_KEY`, `OPENAI_BASE_URL` |
+| `gemini` | `GEMINI_API_KEY` |
 
 ### Test a key
 
@@ -93,6 +110,8 @@ cckey rotate status
 
 The `failover` strategy checks the key at shell startup and rotates through available keys until a working one is found. The `timer` and `counter` strategies silently rotate to the next key when the threshold is reached.
 
+> Note: `cckey next` and smart rotation only cycle through keys of the same type as the currently active key.
+
 ### Other commands
 
 ```bash
@@ -119,13 +138,13 @@ Tab completion is supported for both Bash and Zsh. Commands, key names, and rota
 
 ## How It Works
 
-- Keys are stored in `~/.cckey/keys.conf` (permission `600`)
+- Keys are stored in `~/.cckey/keys.conf` (permission `600`) as `name|key|url|type` records
 - The `~/.cckey/` directory is protected with permission `700`
-- Switching sets `ANTHROPIC_API_KEY` (and `ANTHROPIC_BASE_URL` if configured) in the current shell
-- Switching also syncs `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` to `~/.claude/settings.json` for Claude Code
-- `cckey next` rotates through keys in order, wrapping around to the first
+- Switching sets the appropriate environment variables for the key type in the current shell
+- Switching a `claude` key also syncs `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` to `~/.claude/settings.json`
+- `cckey next` rotates through keys of the same type in order, wrapping around to the first
 - Rotation config is stored in `~/.cckey/rotate.conf`
-- Requires `jq` for reading/writing `settings.json`
+- Requires `jq` for reading/writing Claude Code `settings.json`
 
 ## Supported Shells
 
@@ -152,7 +171,7 @@ Tab completion is supported for both Bash and Zsh. Commands, key names, and rota
 
 - [x] Auto-failover: detect quota exhaustion and automatically switch to the next key
 - [x] Smart rotation: timer-based and session-count-based key rotation
-- [ ] Multi-app support: manage keys for Codex CLI, Gemini CLI, OpenCode, etc.
+- [x] Multi-app support: Claude Code, Codex CLI, Gemini CLI
 - [ ] Usage tracking: record and display per-key usage statistics
 - [ ] Encrypted storage: encrypt keys at rest with a master password
 - [ ] Native Windows PowerShell support
