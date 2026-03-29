@@ -287,6 +287,36 @@ _cckey_scan() {
     echo "Done. Run 'cckey list' to see results."
 }
 
+# Manually set the preferred model for a key
+_cckey_set_model() {
+    local name="$1" model="$2"
+    if [ -z "$name" ] || [ -z "$model" ]; then
+        echo "Usage: cckey set-model <name> <model>"
+        echo "Example: cckey set-model mykey claude-sonnet-4-6"
+        return 1
+    fi
+    local line
+    line=$(grep "^${name}|" "$KEYS_FILE" 2>/dev/null)
+    if [ -z "$line" ]; then
+        echo "Key not found: $name"
+        return 1
+    fi
+    local key url type models
+    key=$(echo "$line" | cut -d'|' -f2)
+    url=$(echo "$line" | cut -d'|' -f3)
+    type=$(echo "$line" | cut -d'|' -f4)
+    models=$(echo "$line" | cut -d'|' -f5)
+    # Prepend model to models list so _cckey_best_model picks it first
+    if [ -n "$models" ]; then
+        models="${model},${models}"
+    else
+        models="$model"
+    fi
+    sed -i.bak "/^${name}|/d" "$KEYS_FILE" && rm -f "${KEYS_FILE}.bak"
+    echo "${name}|${key}|${url}|${type}|${models}" >> "$KEYS_FILE"
+    echo "Set preferred model for $name: $model"
+}
+
 _cckey_apply_key() {
     local name="$1" key="$2" url="$3" type="${4:-claude}"
     case "$type" in
@@ -715,6 +745,7 @@ cckey() {
         rotate)       _cckey_rotate "$@" ;;
         models)       _cckey_models "$@" ;;
         scan)         _cckey_scan ;;
+        set-model)    _cckey_set_model "$@" ;;
         failover)     # backward compat
             case "$1" in
                 on)  _cckey_rotate failover ;;
