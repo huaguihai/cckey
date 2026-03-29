@@ -1,6 +1,6 @@
 #!/bin/bash
 # cckey - AI CLI API Key Manager
-# Version: 0.6.0
+# Version: 0.5.0
 # https://github.com/huaguihai/cckey
 #
 # A lightweight CLI tool for managing multiple AI API keys.
@@ -12,7 +12,6 @@ KEYS_DIR="$HOME/.cckey"
 KEYS_FILE="$KEYS_DIR/keys.conf"
 CURRENT_FILE="$KEYS_DIR/current"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
-CODEX_CONFIG="$HOME/.codex/config.toml"
 
 mkdir -p "$KEYS_DIR" && chmod 700 "$KEYS_DIR"
 touch "$KEYS_FILE" && chmod 600 "$KEYS_FILE"
@@ -32,31 +31,86 @@ _cckey_sync_settings() {
     ' "$CLAUDE_SETTINGS" > "$tmp" && mv "$tmp" "$CLAUDE_SETTINGS"
 }
 
-_cckey_sync_codex() {
-    local url="$1"
-    local codex_dir
-    codex_dir="$(dirname "$CODEX_CONFIG")"
-    mkdir -p "$codex_dir"
-    local block
+# Fetch supported Claude models from a provider's /v1/models endpoint
+# Usage: _cckey_fetch_models <key> <url>
+# Returns: comma-separated model ids, or empty string on failure
+_cckey_fetch_models() {
+    local key="$1" url="$2"
+    [ -z "$url" ] && return
+    local models_json
+    models_json=$(curl -sf --max-time 8 \
+        -H "Authorization: Bearer $key" \
+        "${url%/}/v1/models" 2>/dev/null) || return
+    # Extract claude model ids, prefer opus > sonnet > haiku order
+    echo "$models_json" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    ids = [m['id'] for m in data.get('data', []) if 'claude' in m.get('id','').lower()]
+    print(','.join(ids))
+except: pass
+" 2>/dev/null
+}
+
+# Pick best claude model from comma-separated list (opus > sonnet > haiku)
+_cckey_best_model() {
+    local models="$1"
+    [ -z "$models" ] && return
+    local best=""
+    IFS=',' read -ra list <<< "$models"
+    for m in "${list[@]}"; do
+        case "$m" in
+            *opus*)   echo "$m"; return ;;
+        esac
+    done
+    for m in "${list[@]}"; do
+        case "$m" in
+            *sonnet*) echo "$m"; return ;;
+        esac
+    done
+    for m in "${list[@]}"; do
+        case "$m" in
+            *haiku*)  echo "$m"; return ;;
+        esac
+    done
+    # fallback: first in list
+    echo "${list[0]}"
+}
+
+_cckey_sync_claude_to_im() {
+    local key="$1" url="$2" models="$3"
+    local config="$HOME/.claude-to-im/config.env"
+    [ ! -f "$config" ] && return
+    # Update ANTHROPIC_AUTH_TOKEN
+    sed -i "s|^ANTHROPIC_AUTH_TOKEN=.*|ANTHROPIC_AUTH_TOKEN=$key|" "$config"
+    # Update ANTHROPIC_BASE_URL
     if [ -n "$url" ]; then
-        block="[model_providers.openai]\nenv_key = \"OPENAI_API_KEY\"\nbase_url = \"$url\""
+        if grep -q '^ANTHROPIC_BASE_URL=' "$config"; then
+            sed -i "s|^ANTHROPIC_BASE_URL=.*|ANTHROPIC_BASE_URL=$url|" "$config"
+        else
+            echo "ANTHROPIC_BASE_URL=$url" >> "$config"
+        fi
     else
-        block="[model_providers.openai]\nenv_key = \"OPENAI_API_KEY\""
+        sed -i '/^ANTHROPIC_BASE_URL=/d' "$config"
     fi
-    if [ ! -f "$CODEX_CONFIG" ]; then
-        printf '%b\n' "$block" > "$CODEX_CONFIG"
-        return
+    # Update CTI_DEFAULT_MODEL to best supported model
+    if [ -n "$models" ]; then
+        local best
+        best=$(_cckey_best_model "$models")
+        [ -n "$best" ] && echo "  -> best model for this key: $best"
     fi
-    # Backup before modifying
-    cp "$CODEX_CONFIG" "${CODEX_CONFIG}.bak"
-    local tmp="${CODEX_CONFIG}.tmp"
-    awk -v block="$block" '
-        /^\[model_providers\.openai\]/ { skip=1; if (!printed) { printf "%s\n", block; printed=1 } next }
-        skip && /^\[/ { skip=0 }
-        skip { next }
-        !skip { print }
-        END { if (!printed) { printf "\n%s\n", block } }
-    ' "$CODEX_CONFIG" > "$tmp" && mv "$tmp" "$CODEX_CONFIG"
+    echo "  -> claude-to-im config.env updated"
+    # Restart bridge if running
+    local skill_dir="$HOME/.claude/skills/claude-to-im"
+    if [ -f "$skill_dir/scripts/daemon.sh" ]; then
+        local pid_file="$HOME/.claude-to-im/runtime/bridge.pid"
+        if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+            bash "$skill_dir/scripts/daemon.sh" stop 2>/dev/null
+            sleep 1
+            bash "$skill_dir/scripts/daemon.sh" start 2>/dev/null
+            echo "  -> claude-to-im bridge restarted"
+        fi
+    fi
 }
 
 _cckey_list() {
@@ -68,7 +122,7 @@ _cckey_list() {
     [ -f "$CURRENT_FILE" ] && current=$(cat "$CURRENT_FILE")
     echo "Configured API Keys:"
     echo "-------------------------------------------"
-    while IFS='|' read -r name key url type; do
+    while IFS='|' read -r name key url type models; do
         [ -z "$name" ] && continue
         local masked
         if [ ${#key} -gt 16 ]; then
@@ -79,10 +133,16 @@ _cckey_list() {
         local marker="  "
         [ "$name" = "$current" ] && marker="* "
         local type_label="[${type:-claude}]"
+        local model_label=""
+        if [ -n "$models" ]; then
+            local best
+            best=$(_cckey_best_model "$models")
+            [ -n "$best" ] && model_label="  → $best"
+        fi
         if [ -n "$url" ]; then
-            echo "${marker}${name}  ${masked}  (${url})  ${type_label}"
+            echo "${marker}${name}  ${masked}  (${url})  ${type_label}${model_label}"
         else
-            echo "${marker}${name}  ${masked}  ${type_label}"
+            echo "${marker}${name}  ${masked}  ${type_label}${model_label}"
         fi
     done < "$KEYS_FILE"
     echo "-------------------------------------------"
@@ -122,7 +182,18 @@ _cckey_add() {
     else
         echo "Added key: $name"
     fi
-    echo "${name}|${key}|${url}|${type}" >> "$KEYS_FILE"
+    local models=""
+    if [ "$type" = "claude" ] && [ -n "$url" ]; then
+        echo -n "  Fetching supported models..."
+        models=$(_cckey_fetch_models "$key" "$url")
+        if [ -n "$models" ]; then
+            echo " done"
+            echo "  Supported Claude models: $models"
+        else
+            echo " (skipped or unavailable)"
+        fi
+    fi
+    echo "${name}|${key}|${url}|${type}|${models}" >> "$KEYS_FILE"
 }
 
 _cckey_rm() {
@@ -164,6 +235,58 @@ _cckey_rename() {
     echo "Renamed: $old -> $new"
 }
 
+# Show models for a key (or all keys)
+_cckey_models() {
+    local name="$1"
+    if [ -n "$name" ]; then
+        local line
+        line=$(grep "^${name}|" "$KEYS_FILE" 2>/dev/null)
+        if [ -z "$line" ]; then echo "Key not found: $name"; return 1; fi
+        local models
+        models=$(echo "$line" | cut -d'|' -f5)
+        if [ -n "$models" ]; then
+            echo "$name supported models:"
+            echo "$models" | tr ',' '\n' | sed 's/^/  /'
+        else
+            echo "$name: no model info (run: cckey scan)"
+        fi
+    else
+        while IFS='|' read -r name key url type models; do
+            [ -z "$name" ] && continue
+            if [ -n "$models" ]; then
+                local best
+                best=$(_cckey_best_model "$models")
+                echo "$name: $best  (all: $models)"
+            else
+                echo "$name: (unknown — run: cckey scan)"
+            fi
+        done < "$KEYS_FILE"
+    fi
+}
+
+# Scan all claude keys without model info and fetch their supported models
+_cckey_scan() {
+    echo "Scanning supported models for all claude keys..."
+    local tmp
+    tmp=$(mktemp)
+    while IFS='|' read -r name key url type models; do
+        [ -z "$name" ] && continue
+        local entry_type="${type:-claude}"
+        if [ "$entry_type" = "claude" ] && [ -n "$url" ] && [ -z "$models" ]; then
+            echo -n "  $name: fetching..."
+            models=$(_cckey_fetch_models "$key" "$url")
+            if [ -n "$models" ]; then
+                echo " $models"
+            else
+                echo " (unavailable)"
+            fi
+        fi
+        echo "${name}|${key}|${url}|${type}|${models}" >> "$tmp"
+    done < "$KEYS_FILE"
+    mv "$tmp" "$KEYS_FILE" && chmod 600 "$KEYS_FILE"
+    echo "Done. Run 'cckey list' to see results."
+}
+
 _cckey_apply_key() {
     local name="$1" key="$2" url="$3" type="${4:-claude}"
     case "$type" in
@@ -176,8 +299,6 @@ _cckey_apply_key() {
                 unset OPENAI_BASE_URL
                 echo "Switched to: $name"
             fi
-            _cckey_sync_codex "$url"
-            echo "  -> Codex CLI config.toml updated"
             ;;
         gemini)
             export GEMINI_API_KEY="$key"
@@ -194,6 +315,7 @@ _cckey_apply_key() {
             fi
             _cckey_sync_settings "$key" "$url"
             echo "  -> Claude Code settings.json updated"
+            _cckey_sync_claude_to_im "$key" "$url" "${5:-}"
             ;;
     esac
 }
@@ -212,12 +334,13 @@ _cckey_use() {
         _cckey_list
         return 1
     fi
-    local key url type
+    local key url type models
     key=$(echo "$line" | cut -d'|' -f2)
     url=$(echo "$line" | cut -d'|' -f3)
     type=$(echo "$line" | cut -d'|' -f4)
+    models=$(echo "$line" | cut -d'|' -f5)
     echo "$name" > "$CURRENT_FILE" && chmod 600 "$CURRENT_FILE"
-    _cckey_apply_key "$name" "$key" "$url" "${type:-claude}"
+    _cckey_apply_key "$name" "$key" "$url" "${type:-claude}" "$models"
 }
 
 _cckey_next() {
@@ -590,6 +713,8 @@ cckey() {
         import)       _cckey_import "$@" ;;
         test)         _cckey_test "$@" ;;
         rotate)       _cckey_rotate "$@" ;;
+        models)       _cckey_models "$@" ;;
+        scan)         _cckey_scan ;;
         failover)     # backward compat
             case "$1" in
                 on)  _cckey_rotate failover ;;
