@@ -143,8 +143,14 @@ _cckey_list() {
     fi
     local current=""
     [ -f "$CURRENT_FILE" ] && current=$(cat "$CURRENT_FILE")
-    echo "Configured API Keys:"
-    echo "-------------------------------------------"
+    local GREEN=$'\033[0;32m' RESET=$'\033[0m'
+    local count=0
+    while IFS='|' read -r name key url type models; do
+        [ -z "$name" ] && continue
+        count=$((count + 1))
+    done < "$KEYS_FILE"
+    echo "Configured API Keys ($count)"
+    echo ""
     while IFS='|' read -r name key url type models; do
         [ -z "$name" ] && continue
         local masked
@@ -153,23 +159,21 @@ _cckey_list() {
         else
             masked="${key:0:4}****"
         fi
-        local marker="  "
-        [ "$name" = "$current" ] && marker="* "
-        local type_label="[${type:-claude}]"
-        local model_label=""
-        if [ -n "$models" ]; then
-            local best
-            best=$(_cckey_best_model "$models")
-            [ -n "$best" ] && model_label="  → $best"
-        fi
-        if [ -n "$url" ]; then
-            echo "${marker}${name}  ${masked}  (${url})  ${type_label}${model_label}"
+        local host=""
+        [ -n "$url" ] && host=$(echo "$url" | sed 's|https\?://||;s|/.*||')
+        local best=""
+        [ -n "$models" ] && best=$(_cckey_best_model "$models")
+        if [ "$name" = "$current" ]; then
+            echo -e "${GREEN}▶ ${name}${RESET}"
+            echo -e "${GREEN}  └─ ${masked}  ${host}${RESET}"
+            [ -n "$best" ] && echo -e "${GREEN}     model: ${best}${RESET}"
         else
-            echo "${marker}${name}  ${masked}  ${type_label}${model_label}"
+            echo "  $name"
+            echo "  └─ $masked  $host"
+            [ -n "$best" ] && echo "     model: $best"
         fi
+        echo ""
     done < "$KEYS_FILE"
-    echo "-------------------------------------------"
-    echo "(* = active)"
 }
 
 _cckey_add() {
