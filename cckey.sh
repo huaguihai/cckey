@@ -12,6 +12,7 @@ KEYS_DIR="$HOME/.cckey"
 KEYS_FILE="$KEYS_DIR/keys.conf"
 CURRENT_FILE="$KEYS_DIR/current"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+CODEX_CONFIG="$HOME/.codex/config.toml"
 
 mkdir -p "$KEYS_DIR" && chmod 700 "$KEYS_DIR"
 touch "$KEYS_FILE" && chmod 600 "$KEYS_FILE"
@@ -29,6 +30,33 @@ _cckey_sync_settings() {
         if $url != "" then .env.ANTHROPIC_BASE_URL = $url
         else del(.env.ANTHROPIC_BASE_URL) end
     ' "$CLAUDE_SETTINGS" > "$tmp" && mv "$tmp" "$CLAUDE_SETTINGS"
+}
+
+_cckey_sync_codex() {
+    local url="$1"
+    local codex_dir
+    codex_dir="$(dirname "$CODEX_CONFIG")"
+    mkdir -p "$codex_dir"
+    local block
+    if [ -n "$url" ]; then
+        block="[model_providers.openai]\nenv_key = \"OPENAI_API_KEY\"\nbase_url = \"$url\""
+    else
+        block="[model_providers.openai]\nenv_key = \"OPENAI_API_KEY\""
+    fi
+    if [ ! -f "$CODEX_CONFIG" ]; then
+        printf '%b\n' "$block" > "$CODEX_CONFIG"
+        return
+    fi
+    # Backup before modifying
+    cp "$CODEX_CONFIG" "${CODEX_CONFIG}.bak"
+    local tmp="${CODEX_CONFIG}.tmp"
+    awk -v block="$block" '
+        /^\[model_providers\.openai\]/ { skip=1; if (!printed) { printf "%s\n", block; printed=1 } next }
+        skip && /^\[/ { skip=0 }
+        skip { next }
+        !skip { print }
+        END { if (!printed) { printf "\n%s\n", block } }
+    ' "$CODEX_CONFIG" > "$tmp" && mv "$tmp" "$CODEX_CONFIG"
 }
 
 _cckey_list() {
@@ -148,6 +176,8 @@ _cckey_apply_key() {
                 unset OPENAI_BASE_URL
                 echo "Switched to: $name"
             fi
+            _cckey_sync_codex "$url"
+            echo "  -> Codex CLI config.toml updated"
             ;;
         gemini)
             export GEMINI_API_KEY="$key"
