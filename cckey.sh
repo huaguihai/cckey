@@ -1,13 +1,13 @@
 #!/bin/bash
 # cckey - AI CLI API Key Manager
-# Version: 0.6.2
+# Version: 0.6.4
 # https://github.com/huaguihai/cckey
 #
 # A lightweight CLI tool for managing multiple AI API keys.
 # Supports Claude Code, Codex CLI, and Gemini CLI.
 # Designed for headless Linux servers where GUI tools cannot run.
 
-CCKEY_VERSION="0.6.2"
+CCKEY_VERSION="0.6.4"
 KEYS_DIR="$HOME/.cckey"
 KEYS_FILE="$KEYS_DIR/keys.conf"
 CURRENT_FILE="$KEYS_DIR/current"
@@ -787,16 +787,19 @@ cckey() {
             echo ""
             echo "Commands:"
             echo "  cckey add <name> <key> [base_url] [--type claude|codex|gemini]"
-            echo "                                     Add or update a key"
+            echo "                                     Add or update a key (auto-fetches supported models)"
             echo "  cckey use <name>                   Switch to a key"
             echo "  cckey next                         Switch to next key of same type"
             echo "  cckey list                         List all keys"
             echo "  cckey current                      Show active key"
+            echo "  cckey models [name]                Show supported models for a key (or all keys)"
+            echo "  cckey scan                         Fetch supported models for all keys"
+            echo "  cckey set-model <name> <model>     Pin preferred model for a key"
             echo "  cckey rm <name>                    Remove a key"
             echo "  cckey rename <old> <new>           Rename a key"
             echo "  cckey import [name]                Import key from Claude Code settings"
             echo "  cckey test [name]                  Test if a key is valid"
-            echo "  cckey rotate <strategy> [value]     Smart rotation (failover|timer|counter|off|status)"
+            echo "  cckey rotate <strategy> [value]    Smart rotation (failover|timer|counter|off|status)"
             echo "  cckey update                       Update cckey to latest version"
             echo "  cckey version                      Show version"
             echo "  cckey help                         Show this help"
