@@ -1,13 +1,13 @@
 #!/bin/bash
 # cckey - AI CLI API Key Manager
-# Version: 0.6.1
+# Version: 0.6.2
 # https://github.com/huaguihai/cckey
 #
 # A lightweight CLI tool for managing multiple AI API keys.
 # Supports Claude Code, Codex CLI, and Gemini CLI.
 # Designed for headless Linux servers where GUI tools cannot run.
 
-CCKEY_VERSION="0.6.1"
+CCKEY_VERSION="0.6.2"
 KEYS_DIR="$HOME/.cckey"
 KEYS_FILE="$KEYS_DIR/keys.conf"
 CURRENT_FILE="$KEYS_DIR/current"
