@@ -51,6 +51,21 @@ cckey add gpt4-proxy sk-openai-xxxxx https://api.openai.com --type codex
 cckey add gem1 AIzaSy-xxxxx --type gemini
 ```
 
+When adding a Claude key with a base URL, cckey automatically queries `/v1/models` to detect supported models. The best model (opus > sonnet > haiku) is displayed when listing keys.
+
+### Model management
+
+```bash
+# Show supported models for all keys
+cckey models
+
+# Show supported models for a specific key
+cckey models main
+
+# Scan all keys to fetch/refresh supported models
+cckey scan
+```
+
 ### Switch keys
 
 ```bash
@@ -138,10 +153,11 @@ Tab completion is supported for both Bash and Zsh. Commands, key names, and rota
 
 ## How It Works
 
-- Keys are stored in `~/.cckey/keys.conf` (permission `600`) as `name|key|url|type` records
+- Keys are stored in `~/.cckey/keys.conf` (permission `600`) as `name|key|url|type|models` records
 - The `~/.cckey/` directory is protected with permission `700`
 - Switching sets the appropriate environment variables for the key type in the current shell
 - Switching a `claude` key also syncs `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL` to `~/.claude/settings.json`
+- Switching also syncs the active key and best supported model to `~/.claude-to-im/config.env` and restarts the bridge (if running)
 - `cckey next` rotates through keys of the same type in order, wrapping around to the first
 - Rotation config is stored in `~/.cckey/rotate.conf`
 - Requires `jq` for reading/writing Claude Code `settings.json`
