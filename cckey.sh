@@ -52,27 +52,50 @@ except: pass
 " 2>/dev/null
 }
 
-# Pick best claude model from comma-separated list (opus > sonnet > haiku)
+# Pick best claude model from comma-separated list (opus > sonnet > haiku, newer version wins within same tier)
 _cckey_best_model() {
     local models="$1"
     [ -z "$models" ] && return
-    local best=""
     IFS=',' read -ra list <<< "$models"
-    for m in "${list[@]}"; do
-        case "$m" in
-            *opus*)   echo "$m"; return ;;
-        esac
-    done
-    for m in "${list[@]}"; do
-        case "$m" in
-            *sonnet*) echo "$m"; return ;;
-        esac
-    done
-    for m in "${list[@]}"; do
-        case "$m" in
-            *haiku*)  echo "$m"; return ;;
-        esac
-    done
+
+    # Extract version key from model name, ignoring date suffixes (8-digit numbers like 20250514)
+    _model_version_key() {
+        echo "$1" | python3 -c "
+import sys, re
+name = sys.stdin.read().strip()
+parts = re.findall(r'[0-9]+', name)
+# Ignore 8-digit date-like numbers (e.g. 20250514)
+version_parts = [p for p in parts if len(p) < 8]
+print(''.join(p.zfill(4) for p in version_parts))
+" 2>/dev/null
+    }
+
+    # Find best model within a tier (highest version number)
+    _best_in_tier() {
+        local pattern="$1"; shift
+        local best_model="" best_key=""
+        for m in "$@"; do
+            case "$m" in
+                *${pattern}*)
+                    local key
+                    key=$(_model_version_key "$m")
+                    if [ -z "$best_key" ] || [[ "$key" > "$best_key" ]]; then
+                        best_model="$m"
+                        best_key="$key"
+                    fi
+                ;;
+            esac
+        done
+        echo "$best_model"
+    }
+
+    local result
+    result=$(_best_in_tier "opus" "${list[@]}")
+    [ -n "$result" ] && echo "$result" && return
+    result=$(_best_in_tier "sonnet" "${list[@]}")
+    [ -n "$result" ] && echo "$result" && return
+    result=$(_best_in_tier "haiku" "${list[@]}")
+    [ -n "$result" ] && echo "$result" && return
     # fallback: first in list
     echo "${list[0]}"
 }
