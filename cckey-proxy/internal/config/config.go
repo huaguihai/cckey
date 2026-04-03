@@ -26,6 +26,7 @@ type Profile struct {
 // Config is the top-level configuration.
 type Config struct {
 	Listen        string   `json:"listen"`
+	ProxyToken    string   `json:"proxy_token,omitempty"` // if set, incoming requests must carry this token
 	ActiveProfile *Profile `json:"active_profile,omitempty"`
 }
 

@@ -76,6 +76,16 @@ func handleRequest(w http.ResponseWriter, r *http.Request, cfg *config.Config) {
 		return
 	}
 
+	// Validate proxy auth token if configured
+	if cfg.ProxyToken != "" {
+		auth := r.Header.Get("Authorization")
+		token := r.Header.Get("x-api-key")
+		if !strings.Contains(auth, cfg.ProxyToken) && token != cfg.ProxyToken {
+			writeAnthropicError(w, http.StatusUnauthorized, "invalid proxy auth token")
+			return
+		}
+	}
+
 	profile := cfg.ActiveProfile
 
 	switch {

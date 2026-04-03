@@ -734,6 +734,19 @@ func openAIContentPartText(part map[string]any) (string, bool) {
 
 // --- Stream relay ---
 
+// sendSSEError writes an Anthropic-format error event to an already-started SSE stream.
+func sendSSEError(w http.ResponseWriter, flusher http.Flusher, message string) {
+	errPayload, _ := json.Marshal(map[string]any{
+		"type": "error",
+		"error": map[string]any{
+			"type":    "api_error",
+			"message": message,
+		},
+	})
+	fmt.Fprintf(w, "event: error\ndata: %s\n\n", errPayload)
+	flusher.Flush()
+}
+
 func relayStreamAsAnthropic(w http.ResponseWriter, body io.Reader, requestedModel string) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -809,6 +822,8 @@ func relayStreamAsAnthropic(w http.ResponseWriter, body io.Reader, requestedMode
 			}
 			if !headerWritten {
 				writeAnthropicError(w, http.StatusBadGateway, err.Error())
+			} else {
+				sendSSEError(w, flusher, err.Error())
 			}
 			return err
 		}
@@ -820,6 +835,8 @@ func relayStreamAsAnthropic(w http.ResponseWriter, body io.Reader, requestedMode
 			if err := processEvent(); err != nil {
 				if !headerWritten {
 					writeAnthropicError(w, http.StatusBadGateway, err.Error())
+				} else {
+					sendSSEError(w, flusher, err.Error())
 				}
 				return err
 			}
