@@ -7,11 +7,15 @@
 # Supports Claude Code, Codex CLI, and Gemini CLI.
 # Designed for headless Linux servers where GUI tools cannot run.
 
-CCKEY_VERSION="0.6.4"
+CCKEY_VERSION="0.7.0"
 KEYS_DIR="$HOME/.cckey"
 KEYS_FILE="$KEYS_DIR/keys.conf"
 CURRENT_FILE="$KEYS_DIR/current"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+PROXY_BIN="${CCKEY_PROXY_BIN:-$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "$0")")/cckey-proxy/cckey-proxy}"
+PROXY_PID_FILE="$KEYS_DIR/proxy.pid"
+PROXY_LOG_FILE="$KEYS_DIR/proxy.log"
+PROXY_LISTEN="${CCKEY_PROXY_LISTEN:-127.0.0.1:5001}"
 
 mkdir -p "$KEYS_DIR" && chmod 700 "$KEYS_DIR"
 touch "$KEYS_FILE" && chmod 600 "$KEYS_FILE"
@@ -362,7 +366,7 @@ _cckey_apply_key() {
             echo "Switched to: $name"
             ;;
         *) # claude (default)
-            export ANTHROPIC_API_KEY="$key"
+            unset ANTHROPIC_API_KEY
             if [ -n "$url" ]; then
                 export ANTHROPIC_BASE_URL="$url"
                 echo "Switched to: $name (base_url: $url)"
@@ -753,6 +757,204 @@ _cckey_check_rotate() {
     esac
 }
 
+# ── Proxy management ─────────────────────────────────────────────────
+
+_cckey_proxy_running() {
+    [ -f "$PROXY_PID_FILE" ] && kill -0 "$(cat "$PROXY_PID_FILE")" 2>/dev/null
+}
+
+_cckey_proxy_generate_config() {
+    # Generate JSON config from current active key for cckey-proxy
+    local current_name
+    current_name=$(cat "$CURRENT_FILE" 2>/dev/null)
+    [ -z "$current_name" ] && echo '{"error":"no active key"}' && return 1
+
+    local line
+    line=$(grep "^${current_name}|" "$KEYS_FILE" 2>/dev/null)
+    [ -z "$line" ] && echo '{"error":"key not found"}' && return 1
+
+    local key url type models
+    key=$(echo "$line" | cut -d'|' -f2)
+    url=$(echo "$line" | cut -d'|' -f3)
+    type=$(echo "$line" | cut -d'|' -f4)
+    models=$(echo "$line" | cut -d'|' -f5)
+
+    local mode="passthrough"
+    # If type is not claude, use translate mode (OpenAI-compatible)
+    [ "$type" = "codex" ] || [ "$type" = "gemini" ] && mode="translate"
+    # If base_url is set and type is claude, still passthrough
+    # User can override with CCKEY_PROXY_MODE env var
+    [ -n "$CCKEY_PROXY_MODE" ] && mode="$CCKEY_PROXY_MODE"
+
+    # Build model_map from models field
+    local model_map="{}"
+    if [ -n "$models" ]; then
+        local best
+        best=$(_cckey_best_model "$models")
+        [ -n "$best" ] && model_map="{\"claude-opus-4-6\":\"$best\",\"claude-sonnet-4-6\":\"$best\"}"
+    fi
+
+    cat <<EOJSON
+{
+  "listen": "$PROXY_LISTEN",
+  "active_profile": {
+    "name": "$current_name",
+    "mode": "$mode",
+    "base_url": "${url:-https://api.anthropic.com}",
+    "api_key": "$key",
+    "default_model": "",
+    "model_map": $model_map
+  }
+}
+EOJSON
+}
+
+_cckey_serve() {
+    if ! [ -x "$PROXY_BIN" ] && ! command -v cckey-proxy &>/dev/null; then
+        echo "Error: cckey-proxy binary not found at $PROXY_BIN"
+        echo "Build it: cd cckey-proxy && go build -o cckey-proxy ."
+        return 1
+    fi
+    local bin="$PROXY_BIN"
+    [ -x "$bin" ] || bin="cckey-proxy"
+
+    local config_file
+    config_file=$(mktemp "${KEYS_DIR}/proxy-config.XXXXXX.json")
+    _cckey_proxy_generate_config > "$config_file"
+
+    echo "Starting cckey-proxy on $PROXY_LISTEN..."
+    "$bin" serve --config "$config_file"
+    rm -f "$config_file"
+}
+
+_cckey_proxy() {
+    local subcmd="${1:-status}"
+    shift 2>/dev/null
+    case "$subcmd" in
+        start)
+            if _cckey_proxy_running; then
+                echo "Proxy already running (PID $(cat "$PROXY_PID_FILE"))"
+                return 0
+            fi
+            if ! [ -x "$PROXY_BIN" ] && ! command -v cckey-proxy &>/dev/null; then
+                echo "Error: cckey-proxy binary not found at $PROXY_BIN"
+                echo "Build it: cd cckey-proxy && go build -o cckey-proxy ."
+                return 1
+            fi
+            local bin="$PROXY_BIN"
+            [ -x "$bin" ] || bin="cckey-proxy"
+
+            local config_file="${KEYS_DIR}/proxy-config.json"
+            _cckey_proxy_generate_config > "$config_file"
+
+            nohup "$bin" serve --config "$config_file" > "$PROXY_LOG_FILE" 2>&1 &
+            local pid=$!
+            echo "$pid" > "$PROXY_PID_FILE"
+            sleep 1
+            if kill -0 "$pid" 2>/dev/null; then
+                echo "Proxy started (PID $pid) on $PROXY_LISTEN"
+            else
+                echo "Proxy failed to start. Check $PROXY_LOG_FILE"
+                rm -f "$PROXY_PID_FILE"
+                return 1
+            fi
+            ;;
+        stop)
+            if ! _cckey_proxy_running; then
+                echo "Proxy is not running"
+                rm -f "$PROXY_PID_FILE"
+                return 0
+            fi
+            local pid
+            pid=$(cat "$PROXY_PID_FILE")
+            kill "$pid" 2>/dev/null
+            echo "Proxy stopped (PID $pid)"
+            rm -f "$PROXY_PID_FILE"
+            ;;
+        restart)
+            _cckey_proxy stop
+            sleep 1
+            _cckey_proxy start
+            ;;
+        status)
+            if _cckey_proxy_running; then
+                echo "Proxy is running (PID $(cat "$PROXY_PID_FILE")) on $PROXY_LISTEN"
+                # Try health check
+                local health
+                health=$(curl -sf "http://${PROXY_LISTEN}/health" 2>/dev/null)
+                if [ -n "$health" ]; then
+                    echo "Health: $(echo "$health" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(f"OK - {d.get(\"active_profile\",\"?\")} ({d.get(\"mode\",\"?\")})")' 2>/dev/null || echo "$health")"
+                fi
+            else
+                echo "Proxy is not running"
+            fi
+            ;;
+        *)
+            echo "Usage: cckey proxy <start|stop|restart|status>"
+            ;;
+    esac
+}
+
+_cckey_doctor() {
+    echo "cckey v${CCKEY_VERSION} diagnostics"
+    echo "─────────────────────────────"
+    echo "Config dir:     $KEYS_DIR"
+    echo "Keys file:      $KEYS_FILE ($(wc -l < "$KEYS_FILE" 2>/dev/null || echo 0) keys)"
+    echo "Settings file:  $CLAUDE_SETTINGS"
+    echo ""
+
+    # Active key
+    local current_name
+    current_name=$(cat "$CURRENT_FILE" 2>/dev/null)
+    if [ -n "$current_name" ]; then
+        echo "Active key:     $current_name"
+        local line
+        line=$(grep "^${current_name}|" "$KEYS_FILE" 2>/dev/null)
+        if [ -n "$line" ]; then
+            local key url type
+            key=$(echo "$line" | cut -d'|' -f2)
+            url=$(echo "$line" | cut -d'|' -f3)
+            type=$(echo "$line" | cut -d'|' -f4)
+            echo "  Type:         ${type:-claude}"
+            echo "  Base URL:     ${url:-https://api.anthropic.com}"
+            echo "  Key:          $(_cckey_mask "$key")"
+        fi
+    else
+        echo "Active key:     (none)"
+    fi
+    echo ""
+
+    # Proxy status
+    echo "Proxy binary:   $([ -x "$PROXY_BIN" ] && echo "$PROXY_BIN" || echo "(not found)")"
+    if _cckey_proxy_running; then
+        echo "Proxy status:   Running (PID $(cat "$PROXY_PID_FILE")) on $PROXY_LISTEN"
+        local health
+        health=$(curl -sf "http://${PROXY_LISTEN}/health" 2>/dev/null)
+        [ -n "$health" ] && echo "Proxy health:   OK"
+    else
+        echo "Proxy status:   Not running"
+    fi
+    echo ""
+
+    # Claude settings check
+    if [ -f "$CLAUDE_SETTINGS" ] && command -v jq &>/dev/null; then
+        local env_url env_key
+        env_url=$(jq -r '.env.ANTHROPIC_BASE_URL // empty' "$CLAUDE_SETTINGS" 2>/dev/null)
+        env_key=$(jq -r '.env.ANTHROPIC_AUTH_TOKEN // empty' "$CLAUDE_SETTINGS" 2>/dev/null)
+        echo "Claude settings:"
+        [ -n "$env_url" ] && echo "  BASE_URL:     $env_url"
+        [ -n "$env_key" ] && echo "  AUTH_TOKEN:   $(_cckey_mask "$env_key")"
+        [ -z "$env_url" ] && [ -z "$env_key" ] && echo "  (using defaults)"
+    fi
+    echo ""
+
+    # Upstream connectivity
+    if [ -n "$current_name" ]; then
+        echo "Upstream probe..."
+        _cckey_test "$current_name" 2>/dev/null
+    fi
+}
+
 # Run rotation check on source
 _cckey_check_rotate
 
@@ -781,6 +983,9 @@ cckey() {
             esac
             ;;
         update)       _cckey_update ;;
+        serve)        _cckey_serve ;;
+        proxy)        _cckey_proxy "$@" ;;
+        doctor)       _cckey_doctor ;;
         version|--version|-v) echo "cckey v${CCKEY_VERSION}" ;;
         help|--help|-h|*)
             echo "cckey v${CCKEY_VERSION} - AI CLI API Key Manager"
@@ -800,6 +1005,9 @@ cckey() {
             echo "  cckey import [name]                Import key from Claude Code settings"
             echo "  cckey test [name]                  Test if a key is valid"
             echo "  cckey rotate <strategy> [value]    Smart rotation (failover|timer|counter|off|status)"
+            echo "  cckey serve                        Run proxy in foreground (for current key)"
+            echo "  cckey proxy <start|stop|status>    Manage proxy daemon"
+            echo "  cckey doctor                       Full diagnostics"
             echo "  cckey update                       Update cckey to latest version"
             echo "  cckey version                      Show version"
             echo "  cckey help                         Show this help"
@@ -817,7 +1025,7 @@ if [ -n "$BASH_VERSION" ]; then
         local cur="${COMP_WORDS[COMP_CWORD]}"
         local prev="${COMP_WORDS[COMP_CWORD-1]}"
         if [ "$COMP_CWORD" -eq 1 ]; then
-            COMPREPLY=($(compgen -W "add use switch rm remove rename next list ls current import test rotate update version help" -- "$cur"))
+            COMPREPLY=($(compgen -W "add use switch rm remove rename next list ls current import test rotate models scan set-model serve proxy doctor update version help" -- "$cur"))
         elif [ "$COMP_CWORD" -eq 2 ]; then
             case "$prev" in
                 use|switch|rm|remove|test|rename)
@@ -825,6 +1033,9 @@ if [ -n "$BASH_VERSION" ]; then
                     ;;
                 rotate)
                     COMPREPLY=($(compgen -W "failover timer counter off status" -- "$cur"))
+                    ;;
+                proxy)
+                    COMPREPLY=($(compgen -W "start stop restart status" -- "$cur"))
                     ;;
             esac
         fi
@@ -836,7 +1047,10 @@ elif [ -n "$ZSH_VERSION" ]; then
             'rm:Remove a key' 'remove:Remove a key' 'rename:Rename a key' 'next:Switch to next key'
             'list:List all keys' 'ls:List all keys' 'current:Show active key'
             'import:Import key from Claude Code settings' 'test:Test if a key is valid'
-            'rotate:Smart key rotation strategy' 'update:Update cckey to latest version'
+            'rotate:Smart key rotation strategy' 'models:Show supported models'
+            'scan:Fetch models for all keys' 'set-model:Pin preferred model'
+            'serve:Run proxy in foreground' 'proxy:Manage proxy daemon' 'doctor:Full diagnostics'
+            'update:Update cckey to latest version'
             'version:Show version' 'help:Show help')
         if (( CURRENT == 2 )); then
             _describe 'command' subcmds
@@ -850,6 +1064,11 @@ elif [ -n "$ZSH_VERSION" ]; then
                     local -a strategies=('failover:Auto-switch on API errors' 'timer:Rotate every N hours'
                         'counter:Rotate every N sessions' 'off:Disable rotation' 'status:Show current strategy')
                     _describe 'strategy' strategies
+                    ;;
+                proxy)
+                    local -a proxy_cmds=('start:Start proxy daemon' 'stop:Stop proxy daemon'
+                        'restart:Restart proxy daemon' 'status:Show proxy status')
+                    _describe 'proxy command' proxy_cmds
                     ;;
             esac
         fi
