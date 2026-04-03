@@ -1,6 +1,6 @@
 # cckey
 
-Lightweight CLI tool for managing multiple AI API keys for [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://github.com/openai/codex), and [Gemini CLI](https://github.com/google-gemini/gemini-cli).
+Lightweight CLI tool for managing multiple AI API keys and local proxy for [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Codex CLI](https://github.com/openai/codex), and [Gemini CLI](https://github.com/google-gemini/gemini-cli).
 
 Designed for headless servers and terminals where GUI tools cannot run.
 
@@ -151,6 +151,59 @@ cckey version
 
 Tab completion is supported for both Bash and Zsh. Commands, key names, and rotation strategies auto-complete.
 
+## Local Proxy
+
+cckey includes an optional local proxy (`cckey-proxy`) that translates OpenAI-compatible APIs to Anthropic format, allowing Claude Code to work with any provider.
+
+### Build the proxy
+
+```bash
+cd cckey-proxy
+go build -o cckey-proxy .
+```
+
+Or use the build script for cross-compilation:
+
+```bash
+./scripts/build-release.sh
+```
+
+### Proxy commands
+
+```bash
+# Run proxy in foreground (Ctrl+C to stop)
+cckey serve
+
+# Manage proxy daemon
+cckey proxy start    # Start in background, auto-sync Claude Code settings
+cckey proxy stop     # Stop and restore Claude Code settings
+cckey proxy restart  # Restart with current key
+cckey proxy status   # Check proxy status + health
+
+# Full diagnostics
+cckey doctor         # Config, proxy, Claude settings, upstream connectivity
+```
+
+### How the proxy works
+
+```
+Claude Code → cckey-proxy (127.0.0.1:5001) → upstream provider
+```
+
+- **Passthrough mode**: For Anthropic-compatible upstreams, requests are forwarded as-is
+- **Translate mode**: For OpenAI-compatible upstreams, Anthropic ↔ OpenAI protocol translation
+- `cckey proxy start` automatically updates Claude Code's `settings.json` to point at the proxy
+- `cckey proxy stop` restores the original settings
+- A random auth token is generated per-install to prevent unauthorized proxy access
+
+### Using with any2cc
+
+[any2cc](https://github.com/huaguihai/any2cc) is a companion Claude Code plugin that adds behavior enhancement (capability discovery, routing guidance, quality gates). Together:
+
+```
+User → Claude Code → any2cc (plugin hooks) → cckey proxy → upstream provider
+```
+
 ## How It Works
 
 - Keys are stored in `~/.cckey/keys.conf` (permission `600`) as `name|key|url|type|models` records
@@ -182,12 +235,14 @@ Tab completion is supported for both Bash and Zsh. Commands, key names, and rota
 - Bash 4.0+ or Zsh 5.0+
 - [jq](https://jqlang.github.io/jq/) (for Claude Code settings sync)
 - `curl` or `wget` (for `test`, `update`, and `failover` features)
+- [Go 1.23+](https://go.dev/) (only needed to build cckey-proxy from source)
 
 ## Roadmap
 
 - [x] Auto-failover: detect quota exhaustion and automatically switch to the next key
 - [x] Smart rotation: timer-based and session-count-based key rotation
 - [x] Multi-app support: Claude Code, Codex CLI, Gemini CLI
+- [x] Local proxy: protocol translation for non-Anthropic upstreams
 - [ ] Usage tracking: record and display per-key usage statistics
 - [ ] Encrypted storage: encrypt keys at rest with a master password
 - [ ] Native Windows PowerShell support

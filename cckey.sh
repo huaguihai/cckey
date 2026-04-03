@@ -16,6 +16,7 @@ PROXY_BIN="${CCKEY_PROXY_BIN:-$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}" 2
 PROXY_PID_FILE="$KEYS_DIR/proxy.pid"
 PROXY_LOG_FILE="$KEYS_DIR/proxy.log"
 PROXY_LISTEN="${CCKEY_PROXY_LISTEN:-127.0.0.1:5001}"
+PROXY_TOKEN_FILE="$KEYS_DIR/proxy_token"
 
 mkdir -p "$KEYS_DIR" && chmod 700 "$KEYS_DIR"
 touch "$KEYS_FILE" && chmod 600 "$KEYS_FILE"
@@ -782,7 +783,6 @@ _cckey_proxy_generate_config() {
     local mode="passthrough"
     # If type is not claude, use translate mode (OpenAI-compatible)
     [ "$type" = "codex" ] || [ "$type" = "gemini" ] && mode="translate"
-    # If base_url is set and type is claude, still passthrough
     # User can override with CCKEY_PROXY_MODE env var
     [ -n "$CCKEY_PROXY_MODE" ] && mode="$CCKEY_PROXY_MODE"
 
@@ -794,9 +794,20 @@ _cckey_proxy_generate_config() {
         [ -n "$best" ] && model_map="{\"claude-opus-4-6\":\"$best\",\"claude-sonnet-4-6\":\"$best\"}"
     fi
 
+    # Generate or read proxy token
+    local proxy_token
+    if [ -f "$PROXY_TOKEN_FILE" ]; then
+        proxy_token=$(cat "$PROXY_TOKEN_FILE")
+    else
+        proxy_token="sk-cckey-$(head -c 24 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 32)"
+        echo "$proxy_token" > "$PROXY_TOKEN_FILE"
+        chmod 600 "$PROXY_TOKEN_FILE"
+    fi
+
     cat <<EOJSON
 {
   "listen": "$PROXY_LISTEN",
+  "proxy_token": "$proxy_token",
   "active_profile": {
     "name": "$current_name",
     "mode": "$mode",
@@ -853,6 +864,17 @@ _cckey_proxy() {
             sleep 1
             if kill -0 "$pid" 2>/dev/null; then
                 echo "Proxy started (PID $pid) on $PROXY_LISTEN"
+                # Sync proxy endpoint to Claude Code settings
+                local proxy_token
+                proxy_token=$(cat "$PROXY_TOKEN_FILE" 2>/dev/null)
+                if [ -n "$proxy_token" ] && command -v jq &>/dev/null && [ -f "$CLAUDE_SETTINGS" ]; then
+                    local tmp="${CLAUDE_SETTINGS}.tmp"
+                    jq --arg url "http://$PROXY_LISTEN" --arg token "$proxy_token" '
+                        .env.ANTHROPIC_BASE_URL = $url |
+                        .env.ANTHROPIC_AUTH_TOKEN = $token
+                    ' "$CLAUDE_SETTINGS" > "$tmp" && mv "$tmp" "$CLAUDE_SETTINGS"
+                    echo "Claude Code settings updated (BASE_URL → http://$PROXY_LISTEN)"
+                fi
             else
                 echo "Proxy failed to start. Check $PROXY_LOG_FILE"
                 rm -f "$PROXY_PID_FILE"
@@ -870,6 +892,20 @@ _cckey_proxy() {
             kill "$pid" 2>/dev/null
             echo "Proxy stopped (PID $pid)"
             rm -f "$PROXY_PID_FILE"
+            # Restore Claude Code settings to direct upstream
+            local current_name
+            current_name=$(cat "$CURRENT_FILE" 2>/dev/null)
+            if [ -n "$current_name" ]; then
+                local line
+                line=$(grep "^${current_name}|" "$KEYS_FILE" 2>/dev/null)
+                if [ -n "$line" ]; then
+                    local key url
+                    key=$(echo "$line" | cut -d'|' -f2)
+                    url=$(echo "$line" | cut -d'|' -f3)
+                    _cckey_sync_settings "$key" "$url"
+                    echo "Claude Code settings restored to direct upstream"
+                fi
+            fi
             ;;
         restart)
             _cckey_proxy stop
